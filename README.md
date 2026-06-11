@@ -133,7 +133,13 @@ docker compose run --rm suivi_stock python stock_app.py --sync-conso
 
 ### Sécurité
 - Aucun port publié : le service n'est joignable **que** depuis le réseau Docker
-  `root_default` (donc par n8n). Les routes `/sync*` n'ont pas d'authentification
-  — **ne pas** les exposer via Traefik sans ajouter d'abord un jeton.
-- Le `.env` (identifiants Orthop, clé Odoo) reste **hors image** et hors git.
+  `root_default` (donc par n8n).
+- **Jeton sur les routes `/sync*`** : renseignez `SYNC_TOKEN` dans le `.env`
+  (générer : `python -c "import secrets; print(secrets.token_hex(24))"`). Tout
+  appel `/sync`, `/sync_parc`, `/sync_catalog`, `/sync_conso` doit alors envoyer
+  l'en-tête **`X-Sync-Token: <valeur>`** (sinon `401`). Les workflows n8n sont
+  configurés pour l'envoyer ; mettez la **même valeur** dans n8n et dans le `.env`.
+  Laisser `SYNC_TOKEN` vide désactive la protection (dev local). La **CLI**
+  (`--sync…`) n'est jamais bloquée.
+- Le `.env` (identifiants Orthop, clé Odoo, jeton) reste **hors image** et hors git.
 

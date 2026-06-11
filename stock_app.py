@@ -7,6 +7,7 @@ import requests
 import xml.etree.ElementTree as ET
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
 
 # Charge le fichier .env s'il existe (python-dotenv optionnel ; sinon on se base
 # uniquement sur les variables d'environnement du système).
@@ -25,6 +26,24 @@ URL             = os.environ.get("ORTHOP_URL", "")
 ORTHOP_ORIGINE  = os.environ.get("ORTHOP_ORIGINE", "")
 ORTHOP_USERNAME = os.environ.get("ORTHOP_USERNAME", "")
 ORTHOP_PASSWORD = os.environ.get("ORTHOP_PASSWORD", "")
+
+# Jeton de protection des routes de synchro (/sync*). Si défini, ces routes
+# exigent l'en-tête HTTP « X-Sync-Token » égal à cette valeur. Vide = accès
+# libre (utile en dev / CLI). La CLI (--sync…) n'est jamais bloquée.
+SYNC_TOKEN      = os.environ.get("SYNC_TOKEN", "")
+
+
+def require_sync_token(fn):
+    """Protège une route : si SYNC_TOKEN est défini, exige l'en-tête
+    X-Sync-Token correspondant ; sinon laisse passer."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if SYNC_TOKEN and request.headers.get("X-Sync-Token", "") != SYNC_TOKEN:
+            return jsonify({"status": "error",
+                            "error": "Jeton manquant ou invalide (X-Sync-Token)"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
+
 
 if not (URL and ORTHOP_USERNAME and ORTHOP_PASSWORD):
     print("⚠️  Identifiants Orthop manquants — créez un fichier .env "
@@ -949,6 +968,7 @@ def route_stock_all():
     return jsonify(get_all_stock(filtre)['rows'])
 
 @app.route('/sync')
+@require_sync_token
 def route_sync():
     filtre = request.args.get('filtre', 'positif')
     return jsonify(sync_to_odoo(filtre))
@@ -958,6 +978,7 @@ def route_parc_all():
     return jsonify(get_all_parc()['rows'])
 
 @app.route('/sync_parc')
+@require_sync_token
 def route_sync_parc():
     return jsonify(sync_parc_to_odoo())
 
@@ -966,6 +987,7 @@ def route_catalog():
     return jsonify(get_catalog())
 
 @app.route('/sync_catalog')
+@require_sync_token
 def route_sync_catalog():
     return jsonify(sync_catalog_to_odoo())
 
@@ -974,6 +996,7 @@ def route_conso_all():
     return jsonify(get_all_conso(int(request.args.get('days', 90)))['rows'])
 
 @app.route('/sync_conso')
+@require_sync_token
 def route_sync_conso():
     return jsonify(sync_conso_to_odoo(int(request.args.get('days', 90))))
 
