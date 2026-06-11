@@ -1,0 +1,26 @@
+services:
+  suivi_stock:
+    build: .
+    image: suivi_stock:latest
+    container_name: suivi_stock
+    # Identifiants Orthop + URL/clé Odoo lus depuis le .env local (jamais dans
+    # l'image). Ce fichier doit être présent à côté du compose.
+    env_file:
+      - .env
+    restart: unless-stopped
+    # Rattaché au réseau Docker de n8n (root_default) : n8n l'appelle par son nom
+    # de service -> http://suivi_stock:5000/...  AUCUN port publié = rien sur
+    # Internet, tout passe par le réseau interne Docker.
+    networks:
+      - n8n_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/').read()"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  n8n_net:
+    external: true
+    name: root_default
