@@ -73,6 +73,8 @@ Deux façons de déclencher :
 | `GET /sync_parc` | Pousse le parc machines vers Odoo |
 | `GET /sync_catalog` | Pousse le catalogue Orthop vers Odoo |
 | `GET /sync_conso` | Pousse la consommation (90 j) vers Odoo |
+| `GET /lots_all` | Stock par lot et par lieu des articles gérés par lot (JSON, lecture seule) |
+| `GET /sync_lots` | Pousse le stock par lot vers Odoo (`/api/lot/sync`) |
 
 ---
 
@@ -121,6 +123,7 @@ Un workflow par synchro : **Schedule Trigger → HTTP Request (GET)** :
 | Parc | `http://suivi_stock:5000/sync_parc` | quotidienne |
 | Catalogue | `http://suivi_stock:5000/sync_catalog` | hebdomadaire |
 | Consommation | `http://suivi_stock:5000/sync_conso` | mensuelle |
+| Lots | `http://suivi_stock:5000/sync_lots` | quotidienne (après le stock) |
 
 > Dans le nœud HTTP Request, mettre un **timeout élevé** (ex. 1 800 000 ms) :
 > conso/parc peuvent durer plusieurs minutes. Chaque endpoint renvoie un
@@ -143,3 +146,22 @@ docker compose run --rm suivi_stock python stock_app.py --sync-conso
   (`--sync…`) n'est jamais bloquée.
 - Le `.env` (identifiants Orthop, clé Odoo, jeton) reste **hors image** et hors git.
 
+
+## 7. Lots (inventaires des partenaires, 13/11/2026)
+
+Pour les articles gérés **par lot** dans Orthop (`GestionSerieLot = 2` : embouts et
+kits téterelles Seinbiose, désinfectants…), l'inventaire de l'espace TLE propose à la
+partenaire les lots connus et compare, lot par lot, ce qu'elle compte au stock d'Orthop.
+
+Ce qu'Orthop donne (API, vu le 13/11/2026) :
+- `FindSerieLot` sans critère liste lots ET séries (`Type` 2 = lot, 1 = série, c.-à-d.
+  les machines) ; sa `Quantite` est la quantité **reçue**, et son lieu est vide ;
+- le stock d'un lot **par lieu** vient de `FindStockDeclinaison` avec
+  `SeqSL` = `Numero` du lot : un appel par lot reçu (une soixantaine).
+
+```
+python stock_app.py --lots        # lecture seule : affiche, n'envoie rien
+python stock_app.py --sync-lots   # pousse vers Odoo (/api/lot/sync)
+```
+La route Odoo `/api/lot/sync` est fournie par le module `mcm_commande_planning` : une
+base sans ce module répond 404.

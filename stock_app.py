@@ -314,13 +314,13 @@ function exportCSV() {
 """
 
 # ─── SOAP ────────────────────────────────────────────────────────
-def post_soap(action, body):
+def post_soap(action, body, timeout=30):
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
         "SOAPAction": f'"http://tempuri.org/ISWOM_Articles/{action}"'
     }
     resp = requests.post(URL, data=body.encode("utf-8"),
-                         headers=headers, verify=False, timeout=30)
+                         headers=headers, verify=False, timeout=timeout)
     return ET.fromstring(resp.text)
 
 # ─── LIEUX ───────────────────────────────────────────────────────
@@ -379,6 +379,8 @@ def get_articles():
         lib  = art.findtext(f'{{{NS_ART}}}Libelle') or ''
         ref  = art.findtext(f'{{{NS_ART}}}ManufacturerRef') or ''
         decl = art.findtext(f'{{{NS_ART}}}CodeDeclinaisonDefaut')
+        # 0 = ni série ni lot, 1 = série (machines, numéros de parc), 2 = lot.
+        gestion_sl = (art.findtext(f'{{{NS_ART}}}GestionSerieLot') or '').strip()
         if not ref.strip():
             ref = f"ART-{code}"
         if code and decl:
@@ -386,7 +388,8 @@ def get_articles():
                 'code':     code,
                 'libelle':  lib,
                 'reference': ref,
-                'decl':     decl
+                'decl':     decl,
+                'gestion_sl': gestion_sl,
             })
     _cache['articles'] = articles
     return articles
@@ -572,6 +575,146 @@ def sync_parc_to_odoo():
         'rows_sent':   len(snap['rows']),
         'parc_total':  snap['total'],
         'parc_kept':   snap['kept'],
+    })
+    return result
+
+
+# ─── LOTS (stock par lot et par lieu) ────────────────────────────
+def _num(texte):
+    try:
+        return float(texte or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_all_lots():
+    """Stock PAR LOT et par lieu des articles gérés par lot (GestionSerieLot = 2).
+
+    Orthop (vu le 13/11/2026) : FindSerieLot sans critère liste tous les lots ET
+    toutes les séries (Type 2 = lot, Type 1 = série, c.-à-d. les machines du
+    parc) ; sa Quantite est la quantité REÇUE du lot, pas son stock, et son lieu
+    est vide. Le stock d'un lot, lieu par lieu, vient de FindStockDeclinaison
+    filtré sur le lot (SeqSL = Numero du lot). Un appel par lot reçu.
+    Renvoie {rows, lots_total, lots_failed} — lots_failed permet de savoir si le
+    snapshot est complet (synchro autoritaire)."""
+    articles = {a['code']: a for a in get_articles() if a.get('gestion_sl') == '2'}
+    lieux_libelles = get_lieux()
+    body = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+        xmlns:tem="http://tempuri.org/"
+        xmlns:mob="http://schemas.datacontract.org/2004/07/Mobilog.Serveur.API.DTO.ParamRetour.Articles"
+        xmlns:art="http://schemas.datacontract.org/2004/07/Mobilog.Serveur.API.DTO.Articles"
+        xmlns:par="http://schemas.datacontract.org/2004/07/Mobilog.Serveur.API.DTO.ParamRetour"
+        xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+      <soapenv:Header/>
+      <soapenv:Body>
+        <tem:FindSerieLot>
+          <tem:paramFindSerieLot>
+            {AUTH}
+            <mob:ControleMax>false</mob:ControleMax>
+            <mob:Recherche></mob:Recherche>
+          </tem:paramFindSerieLot>
+        </tem:FindSerieLot>
+      </soapenv:Body>
+    </soapenv:Envelope>"""
+    root = post_soap("FindSerieLot", body, timeout=300)
+
+    lots = []
+    for s in root.iter(f'{{{NS_ART}}}SerieLot'):
+        if (s.findtext(f'{{{NS_ART}}}Type') or '').strip() != '2':
+            continue
+        code_article = (s.findtext(f'{{{NS_ART}}}CodeArticle') or '').strip()
+        code = (s.findtext(f'{{{NS_ART}}}Code') or '').strip()
+        numero = (s.findtext(f'{{{NS_ART}}}Numero') or '').strip()
+        # Un lot jamais reçu (quantité nulle) n'est en stock nulle part : codes
+        # créés sur le mauvais article, lots « 1 », « 2 »… (relevé du 13/11/2026).
+        if code_article not in articles or not code or not numero \
+                or _num(s.findtext(f'{{{NS_ART}}}Quantite')) <= 0:
+            continue
+        peremption = (s.findtext(f'{{{NS_ART}}}DatePeremption') or '')[:10]
+        lots.append({
+            'code_article': code_article,
+            'decl': (s.findtext(f'{{{NS_ART}}}CodeDeclinaison') or '').strip()
+                    or articles[code_article]['decl'],
+            'lot': code,
+            'lot_seq': numero,
+            'peremption': '' if peremption.startswith('0001') else peremption,
+        })
+
+    def traiter(lot):
+        art = articles[lot['code_article']]
+        body = f"""<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:tem="http://tempuri.org/"
+            xmlns:mob="http://schemas.datacontract.org/2004/07/Mobilog.Serveur.API.DTO.ParamRetour.Articles"
+            xmlns:art="http://schemas.datacontract.org/2004/07/Mobilog.Serveur.API.DTO.Articles"
+            xmlns:par="http://schemas.datacontract.org/2004/07/Mobilog.Serveur.API.DTO.ParamRetour"
+            xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+          <soapenv:Header/>
+          <soapenv:Body>
+            <tem:FindStockDeclinaison>
+              <tem:paramFindStockDeclinaison>
+                {AUTH}
+                <mob:Recherche>
+                  <art:CodeDeclinaison>{lot['decl']}</art:CodeDeclinaison>
+                  <art:SeqSL>{lot['lot_seq']}</art:SeqSL>
+                </mob:Recherche>
+              </tem:paramFindStockDeclinaison>
+            </tem:FindStockDeclinaison>
+          </soapenv:Body>
+        </soapenv:Envelope>"""
+        out = []
+        for sd in post_soap("FindStockDeclinaison", body).iter(f'{{{NS_ART}}}StockDeclinaison'):
+            lieu = (sd.findtext(f'{{{NS_ART}}}CodeLieuStockage') or '').strip()
+            qte = _num(sd.findtext(f'{{{NS_ART}}}QteUtilPourDecl'))
+            if not lieu or not qte:
+                continue
+            out.append({
+                'code_lieu':    lieu,
+                'nom':          lieux_libelles.get(lieu, lieu),
+                'code_article': lot['code_article'],
+                'ref_produit':  art['reference'],
+                'libelle':      art['libelle'],
+                'lot':          lot['lot'],
+                'lot_seq':      lot['lot_seq'],
+                'peremption':   lot['peremption'],
+                'qte':          qte,
+            })
+        return out
+
+    rows, failed = [], 0
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(traiter, lot) for lot in lots]
+        for future in as_completed(futures):
+            try:
+                rows.extend(future.result())
+            except Exception:
+                failed += 1
+    return {'rows': rows, 'lots_total': len(lots), 'lots_failed': failed}
+
+
+def sync_lots_to_odoo():
+    """Stock par lot et par lieu → Odoo (/api/lot/sync). Autoritaire seulement si
+    aucun lot n'a échoué : Odoo efface alors les lignes de lot non reçues."""
+    base = os.environ.get('ODOO_SYNC_URL', '')
+    key = os.environ.get('ODOO_STOCK_API_KEY', '')
+    if not base or not key:
+        return {'error': 'ODOO_SYNC_URL ou ODOO_STOCK_API_KEY manquant (voir .env)'}
+    url = base.replace('/stock/sync', '/lot/sync')
+
+    snap = get_all_lots()
+    full_sync = (snap['lots_failed'] == 0)
+    resp = requests.post(
+        url,
+        json={'rows': snap['rows'], 'full_sync': full_sync},
+        headers={'X-API-Key': key},
+        timeout=300,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    result.update({
+        'rows_sent':   len(snap['rows']),
+        'lots_total':  snap['lots_total'],
+        'lots_failed': snap['lots_failed'],
+        'full_sync':   full_sync,
     })
     return result
 
@@ -982,6 +1125,15 @@ def route_parc_all():
 def route_sync_parc():
     return jsonify(sync_parc_to_odoo())
 
+@app.route('/lots_all')
+def route_lots_all():
+    return jsonify(get_all_lots()['rows'])
+
+@app.route('/sync_lots')
+@require_sync_token
+def route_sync_lots():
+    return jsonify(sync_lots_to_odoo())
+
 @app.route('/catalog')
 def route_catalog():
     return jsonify(get_catalog())
@@ -1050,6 +1202,18 @@ if __name__ == '__main__':
         res = sync_parc_to_odoo()
         print(json.dumps(res, indent=2, ensure_ascii=False))
         sys.exit(0 if res.get('status') == 'ok' else 1)
+
+    if '--sync-lots' in sys.argv:
+        print("Synchronisation du stock par lot vers Odoo...")
+        res = sync_lots_to_odoo()
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        sys.exit(0 if res.get('status') == 'ok' else 1)
+
+    if '--lots' in sys.argv:
+        # Lecture seule : affiche le stock par lot sans rien envoyer à Odoo.
+        snap = get_all_lots()
+        print(json.dumps(snap, indent=1, ensure_ascii=False))
+        sys.exit(0 if snap['lots_failed'] == 0 else 1)
 
     if '--sync-catalog' in sys.argv:
         print("Synchronisation du catalogue Orthop vers Odoo...")
