@@ -749,6 +749,10 @@ def get_catalog():
             'libelle': (a.findtext(f'{{{NS_ART}}}Libelle') or '').strip(),
             'code_famille': (a.findtext(f'{{{NS_ART}}}CodeFamille') or '').strip(),
             'manufacturerref': (a.findtext(f'{{{NS_ART}}}ManufacturerRef') or '').strip(),
+            # Pour le fichier d'inventaire STOCKDAT.TXT qu'Odoo prépare (colonne 1 = code déclinaison),
+            # et le suivi série / lot (0 non, 1 série, 2 lot). Une base Odoo plus ancienne ignore ces clés.
+            'code_declinaison': (a.findtext(f'{{{NS_ART}}}CodeDeclinaisonDefaut') or '').strip(),
+            'gestion_sl': (a.findtext(f'{{{NS_ART}}}GestionSerieLot') or '').strip(),
         }
 
     # 2. Déclinaisons (toutes) → référence Type=1 par CodeArticle
@@ -796,6 +800,8 @@ def get_catalog():
             'libelle':      a['libelle'],
             'reference':    refs.get(a['code']) or a['manufacturerref'] or '',
             'code_famille': a['code_famille'],
+            'code_declinaison': a['code_declinaison'],
+            'gestion_sl': a['gestion_sl'],
         }
         for a in arts.values()
     ]
